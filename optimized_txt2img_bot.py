@@ -3,7 +3,8 @@ import getopt
 from dataclasses import dataclass
 from functools import partial
 from io import BytesIO
-from typing import Literal
+from math import sqrt
+from typing import Literal, Optional, Union, IO
 
 import torch
 import numpy as np
@@ -12,7 +13,7 @@ from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm, trange
 from itertools import islice
-from einops import rearrange
+from einops import rearrange, repeat
 from torchvision.utils import make_grid
 import time
 from pytorch_lightning import seed_everything
@@ -21,7 +22,8 @@ from contextlib import contextmanager, nullcontext
 from ldm.util import instantiate_from_config
 from telegram import Update, InputMediaPhoto
 from telegram.ext import Updater, CommandHandler, CallbackContext, Filters
-from telegram.error import NetworkError
+
+from optimizedSD.ddpm import UNet
 
 
 def chunk(it, size):
@@ -38,6 +40,24 @@ def load_model_from_config(ckpt):
     return sd
 
 
+def load_img(path, h0, w0) -> torch.Tensor:
+    image = Image.open(path).convert("RGB")
+    w, h = image.size
+
+    print(f"loaded input image of size ({w}, {h}) from {path}")
+    if h0 is not None and w0 is not None:
+        h, w = h0, w0
+
+    w, h = map(lambda x: x - x % 64, (w, h))  # resize to integer multiple of 32
+
+    print(f"New image size ({w}, {h})")
+    image = image.resize((w, h), resample=Image.Resampling.LANCZOS)
+    image = np.array(image).astype(np.float32) / 255.0
+    image = image[None].transpose(0, 3, 1, 2)
+    image = torch.from_numpy(image)
+    return 2.0 * image - 1.0
+
+
 config_path = "optimizedSD/v1-inference.yaml"
 ckpt = "models/ldm/stable-diffusion-v1/model.ckpt"
 device = "cuda"
@@ -45,9 +65,9 @@ device = "cuda"
 
 @dataclass
 class ModelSet:
-    model: object
-    modelCS: object
-    modelFS: object
+    model: UNet
+    modelCS: UNet
+    modelFS: UNet
 
 
 def generate(
@@ -65,11 +85,14 @@ def generate(
     C: int = 4,
     f: int = 8,
     ddim_eta: float = 0.0,
+    img: Optional[Union[IO[bytes], str]] = None,  # path or file-like
+    img_prompt_strength: float = 0.8,
 ):
     seed_everything(seed)
 
     if precision == "autocast":
         model_set.model.half()
+        model_set.modelFS.half()
         model_set.modelCS.half()
 
     start_code = None
@@ -78,6 +101,27 @@ def generate(
 
     batch_size = n_samples
     data = [batch_size * [prompt]]
+
+    if img is not None:
+        init_image = load_img(img, H, W).to(device)
+
+        if precision == "autocast":
+            init_image = init_image.half()
+
+        model_set.modelFS.to(device)
+
+        init_image = repeat(init_image, '1 ... -> b ...', b=batch_size)
+        init_latent = model_set.modelFS.get_first_stage_encoding(
+            model_set.modelFS.encode_first_stage(init_image)
+        )  # move to latent space
+
+        mem = torch.cuda.memory_allocated()/1e6
+        model_set.modelFS.to("cpu")
+        while torch.cuda.memory_allocated()/1e6 >= mem:
+            time.sleep(1)
+
+        t_enc = int(img_prompt_strength * ddim_steps)
+        print(f"target t_enc is {t_enc} steps")
 
     precision_scope = autocast if precision == "autocast" else nullcontext
 
@@ -95,24 +139,40 @@ def generate(
                         prompts = list(prompts)
 
                     c = model_set.modelCS.get_learned_conditioning(prompts)
-                    shape = [C, H // f, W // f]
                     mem = torch.cuda.memory_allocated() / 1e6
                     model_set.modelCS.to("cpu")
                     while torch.cuda.memory_allocated() / 1e6 >= mem:
                         time.sleep(1)
 
-                    samples_ddim = model_set.model.sample(
-                        S=ddim_steps,
-                        conditioning=c,
-                        batch_size=n_samples,
-                        shape=shape,
-                        verbose=False,
-                        unconditional_guidance_scale=scale,
-                        unconditional_conditioning=uc,
-                        eta=ddim_eta,
-                        x_T=start_code,
-                        seed=seed,
-                    )
+                    if img is not None:
+                        # encode (scaled latent)
+                        z_enc = model_set.model.stochastic_encode(
+                            init_latent,
+                            torch.tensor([t_enc]*batch_size).to(device),
+                            seed,
+                        )
+                        # decode it
+                        samples_ddim = model_set.model.decode(
+                            z_enc,
+                            c,
+                            t_enc,
+                            unconditional_guidance_scale=scale,
+                            unconditional_conditioning=uc,
+                        )
+                    else:
+                        shape = [C, H // f, W // f]
+                        samples_ddim = model_set.model.sample(
+                            S=ddim_steps,
+                            conditioning=c,
+                            batch_size=n_samples,
+                            shape=shape,
+                            verbose=False,
+                            unconditional_guidance_scale=scale,
+                            unconditional_conditioning=uc,
+                            eta=ddim_eta,
+                            x_T=start_code,
+                            seed=seed,
+                        )
 
                     model_set.modelFS.to(device)
                     print("saving images")
@@ -145,23 +205,18 @@ def generate(
     return results
 
 
-def generate_command(update: Update, context: CallbackContext, model_set: ModelSet) -> None:
+def txt2img_command(update: Update, context: CallbackContext, model_set: ModelSet) -> None:
+    print(f"Command: {update.message.text}")
+
     prefix_len = len("/g ")
     prompt = update.message.text[prefix_len:].strip()
-    print(f"Prompt: {prompt}")
     if not prompt:
         update.message.reply_text(
             "Prompt must be non-empty. Example: /g Red cat", quote=True,
         )
         return
 
-    for _ in range(5):
-        try:
-            update.message.reply_text("Generating...", quote=True, timeout=10)
-            break
-        except NetworkError as e:
-            print(e)
-            continue
+    update.message.reply_text("Generating...", quote=True, timeout=10)
 
     longopts, prompt_unjoined = getopt.getopt(
         prompt.split(),
@@ -181,19 +236,79 @@ def generate_command(update: Update, context: CallbackContext, model_set: ModelS
         seed=seed,
         scale=scale,
     )
-    for _ in range(5):
-        try:
-            media_group = [InputMediaPhoto(x) for x in images]
-            media_group[0].caption = f"{prompt}\n\nSeed: {seed}"
-            update.message.reply_media_group(
-                media_group,
-                quote=True,
-                timeout=60
-            )
-            break
-        except NetworkError as e:
-            print(e)
-            continue
+
+    media_group = [InputMediaPhoto(x) for x in images]
+    media_group[0].caption = f"{prompt}\n\nSeed: {seed}"
+    update.message.reply_media_group(
+        media_group,
+        quote=True,
+        timeout=60
+    )
+
+    print()
+
+
+def img2img_command(update: Update, context: CallbackContext, model_set: ModelSet) -> None:
+    print(f"Command: {update.message.text}")
+
+    prefix_len = len("/i ")
+    prompt = update.message.text[prefix_len:].strip()
+
+    img_bio = BytesIO()
+    update.message.reply_to_message.photo[-1].get_file().download(out=img_bio)
+    img_bio.seek(0)
+
+    # W and H to resize keeping aspect ratio and maintaining fixed number of pixels
+    # (fixed area)
+    w, h = Image.open(img_bio).size
+    img_bio.seek(0)
+    area = 512 * 512
+    aspect_ratio = w / h
+    resized_w = round(sqrt(aspect_ratio) * sqrt(area))
+    resized_h = round(sqrt(area) / sqrt(aspect_ratio))
+
+    longopts, prompt_unjoined = getopt.getopt(
+        prompt.split(),
+        shortopts='',
+        longopts=['seed=', 'scale='],
+    )
+    longopts = dict(longopts)
+    strength, *prompt_unjoined = prompt_unjoined
+    strength = int(strength)
+    if not 1 <= strength <= 100:
+        update.message.reply_text(
+            "Strength must be between 1 and 100", quote=True, timeout=10
+        )
+        return
+    strength = strength / 100
+    prompt = ' '.join(prompt_unjoined)
+
+    if not prompt:
+        update.message.reply_text(
+            "Prompt must be non-empty. Example: /i 50 Red cat", quote=True, timeout=10
+        )
+        return
+
+    update.message.reply_text("Generating...", quote=True, timeout=10)
+
+    seed = int(longopts.get("--seed", random.randint(0, 99999999)))
+    scale = float(longopts.get("--scale", 7.5))
+    images = generate(
+        model_set=model_set,
+        prompt=prompt,
+        ddim_steps=50,
+        n_samples=9,
+        seed=seed,
+        scale=scale,
+        img=img_bio,
+        img_prompt_strength=strength,
+        W=resized_w,
+        H=resized_h,
+    )
+
+    media_group = [InputMediaPhoto(x) for x in images]
+    media_group[0].caption = f"{prompt}\n\nSeed: {seed}"
+    update.message.reply_media_group(media_group, quote=True, timeout=60)
 
     print()
 
@@ -249,7 +364,13 @@ def main() -> None:
     dispatcher.add_handler(
         CommandHandler(
             "g",
-            partial(generate_command, model_set=model_set),
+            partial(txt2img_command, model_set=model_set),
+        )
+    )
+    dispatcher.add_handler(
+        CommandHandler(
+            "i",
+            partial(img2img_command, model_set=model_set),
         )
     )
 
