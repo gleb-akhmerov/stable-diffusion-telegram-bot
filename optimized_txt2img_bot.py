@@ -60,7 +60,6 @@ def load_img(path, h0, w0) -> torch.Tensor:
 
 config_path = "optimizedSD/v1-inference.yaml"
 ckpt = "models/ldm/stable-diffusion-v1/model.ckpt"
-device = "cuda"
 
 
 @dataclass
@@ -87,10 +86,11 @@ def generate(
     ddim_eta: float = 0.0,
     img: Optional[Union[IO[bytes], str]] = None,  # path or file-like
     img_prompt_strength: float = 0.8,
+    device: str = "cuda",
 ):
     seed_everything(seed)
 
-    if precision == "autocast":
+    if device != 'cpu' and precision == "autocast":
         model_set.model.half()
         model_set.modelFS.half()
         model_set.modelCS.half()
@@ -115,15 +115,19 @@ def generate(
             model_set.modelFS.encode_first_stage(init_image)
         )  # move to latent space
 
-        mem = torch.cuda.memory_allocated()/1e6
-        model_set.modelFS.to("cpu")
-        while torch.cuda.memory_allocated()/1e6 >= mem:
-            time.sleep(1)
+        if device != 'cpu':
+            mem = torch.cuda.memory_allocated() / 1e6
+            model_set.modelFS.to("cpu")
+            while torch.cuda.memory_allocated() / 1e6 >= mem:
+                time.sleep(1)
 
         t_enc = int(img_prompt_strength * ddim_steps)
         print(f"target t_enc is {t_enc} steps")
 
-    precision_scope = autocast if precision == "autocast" else nullcontext
+    if precision == "autocast" and device != "cpu":
+        precision_scope = autocast
+    else:
+        precision_scope = nullcontext
 
     results = []
     with torch.no_grad():
@@ -139,10 +143,11 @@ def generate(
                         prompts = list(prompts)
 
                     c = model_set.modelCS.get_learned_conditioning(prompts)
-                    mem = torch.cuda.memory_allocated() / 1e6
-                    model_set.modelCS.to("cpu")
-                    while torch.cuda.memory_allocated() / 1e6 >= mem:
-                        time.sleep(1)
+                    if device != 'cpu':
+                        mem = torch.cuda.memory_allocated() / 1e6
+                        model_set.modelCS.to("cpu")
+                        while torch.cuda.memory_allocated() / 1e6 >= mem:
+                            time.sleep(1)
 
                     if img is not None:
                         # encode (scaled latent)
@@ -195,17 +200,20 @@ def generate(
                         bio.seek(0)
                         results.append(bio.read())
 
-                    mem = torch.cuda.memory_allocated() / 1e6
-                    model_set.modelFS.to("cpu")
-                    while torch.cuda.memory_allocated() / 1e6 >= mem:
-                        time.sleep(1)
+                    if device != 'cpu':
+                        mem = torch.cuda.memory_allocated() / 1e6
+                        model_set.modelFS.to("cpu")
+                        while torch.cuda.memory_allocated() / 1e6 >= mem:
+                            time.sleep(1)
 
                     del samples_ddim
 
     return results
 
 
-def txt2img_command(update: Update, context: CallbackContext, model_set: ModelSet) -> None:
+def txt2img_command(
+        update: Update, context: CallbackContext, model_set: ModelSet, device: str
+) -> None:
     print(f"Command: {update.message.text}")
 
     prefix_len = len("/g ")
@@ -235,6 +243,7 @@ def txt2img_command(update: Update, context: CallbackContext, model_set: ModelSe
         n_samples=9,
         seed=seed,
         scale=scale,
+        device=device,
     )
 
     media_group = [InputMediaPhoto(x) for x in images]
@@ -248,7 +257,9 @@ def txt2img_command(update: Update, context: CallbackContext, model_set: ModelSe
     print()
 
 
-def img2img_command(update: Update, context: CallbackContext, model_set: ModelSet) -> None:
+def img2img_command(
+        update: Update, context: CallbackContext, model_set: ModelSet, device: str
+) -> None:
     print(f"Command: {update.message.text}")
 
     prefix_len = len("/i ")
@@ -304,6 +315,7 @@ def img2img_command(update: Update, context: CallbackContext, model_set: ModelSe
         img_prompt_strength=strength,
         W=resized_w,
         H=resized_h,
+        device=device,
     )
 
     media_group = [InputMediaPhoto(x) for x in images]
@@ -313,7 +325,7 @@ def img2img_command(update: Update, context: CallbackContext, model_set: ModelSe
     print()
 
 
-def load_model_set(ddim_steps: int, small_batch: bool = False) -> ModelSet:
+def load_model_set(device: str, small_batch: bool = False) -> ModelSet:
     sd = load_model_from_config(f"{ckpt}")
     li = []
     lo = []
@@ -334,16 +346,18 @@ def load_model_set(ddim_steps: int, small_batch: bool = False) -> ModelSet:
         sd['model2.' + key[6:]] = sd.pop(key)
 
     config = OmegaConf.load(config_path)
-    config.modelUNet.params.ddim_steps = ddim_steps
 
     if small_batch:
         config.modelUNet.params.small_batch = True
     else:
         config.modelUNet.params.small_batch = False
 
+    config.modelCondStage.params.cond_stage_config.params.device = device
+
     model = instantiate_from_config(config.modelUNet)
     _, _ = model.load_state_dict(sd, strict=False)
     model.eval()
+    model.cdevice = device
 
     modelCS = instantiate_from_config(config.modelCondStage)
     _, _ = modelCS.load_state_dict(sd, strict=False)
@@ -357,20 +371,21 @@ def load_model_set(ddim_steps: int, small_batch: bool = False) -> ModelSet:
 
 
 def main() -> None:
-    model_set = load_model_set(ddim_steps=50)
+    device = "cuda"
+    model_set = load_model_set(device=device)
 
     updater = Updater("TOKEN")
     dispatcher = updater.dispatcher
     dispatcher.add_handler(
         CommandHandler(
             "g",
-            partial(txt2img_command, model_set=model_set),
+            partial(txt2img_command, model_set=model_set, device=device),
         )
     )
     dispatcher.add_handler(
         CommandHandler(
             "i",
-            partial(img2img_command, model_set=model_set),
+            partial(img2img_command, model_set=model_set, device=device),
         )
     )
 
