@@ -152,9 +152,11 @@ def generate(
                     if img is not None:
                         # encode (scaled latent)
                         z_enc = model_set.model.stochastic_encode(
-                            init_latent,
-                            torch.tensor([t_enc]*batch_size).to(device),
-                            seed,
+                            x0=init_latent,
+                            t=torch.tensor([t_enc]*batch_size).to(device),
+                            seed=seed,
+                            ddim_eta=ddim_eta,
+                            ddim_steps=ddim_steps,
                         )
                         # decode it
                         samples_ddim = model_set.model.decode(
