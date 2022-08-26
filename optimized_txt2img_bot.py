@@ -105,7 +105,7 @@ def generate(
     if img is not None:
         init_image = load_img(img, H, W).to(device)
 
-        if precision == "autocast":
+        if device != 'cpu' and precision == "autocast":
             init_image = init_image.half()
 
         model_set.modelFS.to(device)
