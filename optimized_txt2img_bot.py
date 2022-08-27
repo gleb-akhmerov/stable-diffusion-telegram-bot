@@ -69,6 +69,47 @@ class ModelSet:
     modelFS: UNet
 
 
+def load_model_set(device: str, turbo: bool = True) -> ModelSet:
+    sd = load_model_from_config(f"{ckpt}")
+    li = []
+    lo = []
+    for key, value in sd.items():
+        sp = key.split('.')
+        if (sp[0]) == 'model':
+            if 'input_blocks' in sp:
+                li.append(key)
+            elif 'middle_block' in sp:
+                li.append(key)
+            elif 'time_embed' in sp:
+                li.append(key)
+            else:
+                lo.append(key)
+    for key in li:
+        sd['model1.' + key[6:]] = sd.pop(key)
+    for key in lo:
+        sd['model2.' + key[6:]] = sd.pop(key)
+
+    config = OmegaConf.load(config_path)
+
+    model = instantiate_from_config(config.modelUNet)
+    _, _ = model.load_state_dict(sd, strict=False)
+    model.eval()
+    model.unet_bs = 1
+    model.cdevice = device
+    model.turbo = turbo
+
+    modelCS = instantiate_from_config(config.modelCondStage)
+    _, _ = modelCS.load_state_dict(sd, strict=False)
+    modelCS.eval()
+    modelCS.cond_stage_model.device = device
+
+    modelFS = instantiate_from_config(config.modelFirstStage)
+    _, _ = modelFS.load_state_dict(sd, strict=False)
+    modelFS.eval()
+
+    return ModelSet(model=model, modelCS=modelCS, modelFS=modelFS)
+
+
 def generate(
     model_set: ModelSet,
     prompt: str,
@@ -77,7 +118,7 @@ def generate(
     scale: float = 7.5,
     seed: int = 42,
     precision: Literal["autocast", "full"] = "autocast",
-    fixed_code: bool = True,
+    fixed_code: bool = False,
     n_iter: int = 1,
     H: int = 512,
     W: int = 512,
@@ -129,7 +170,6 @@ def generate(
     else:
         precision_scope = nullcontext
 
-    results = []
     with torch.no_grad():
 
         for _ in trange(n_iter, desc="Sampling"):
@@ -200,7 +240,8 @@ def generate(
                         bio = BytesIO()
                         Image.fromarray(x_sample.astype(np.uint8)).save(bio, format="png")
                         bio.seek(0)
-                        results.append(bio.read())
+                        seed += 1
+                        yield bio.read()
 
                     if device != 'cpu':
                         mem = torch.cuda.memory_allocated() / 1e6
@@ -209,8 +250,6 @@ def generate(
                             time.sleep(1)
 
                     del samples_ddim
-
-    return results
 
 
 def txt2img_command(
@@ -226,8 +265,6 @@ def txt2img_command(
         )
         return
 
-    update.message.reply_text("Generating...", quote=True, timeout=10)
-
     longopts, prompt_unjoined = getopt.getopt(
         prompt.split(),
         shortopts='',
@@ -238,23 +275,33 @@ def txt2img_command(
 
     seed = int(longopts.get("--seed", random.randint(0, 99999999)))
     scale = float(longopts.get("--scale", 7.5))
+
+    batch_size = 3
+    batches = 3
+
     images = generate(
         model_set=model_set,
         prompt=prompt,
         ddim_steps=50,
-        n_samples=9,
+        n_samples=batch_size,
+        n_iter=batches,
         seed=seed,
         scale=scale,
         device=device,
     )
-
-    media_group = [InputMediaPhoto(x) for x in images]
-    media_group[0].caption = f"{prompt}\n\nSeed: {seed}"
-    update.message.reply_media_group(
-        media_group,
+    with open("loading.png", "rb") as f:
+        loading_bytes = f.read()
+    loading_photos = [
+        InputMediaPhoto(loading_bytes) for _ in range(batches * batch_size)
+    ]
+    loading_photos[0].caption = f"{prompt}\n\nSeed: {seed}"
+    messages = update.message.reply_media_group(
+        loading_photos,
         quote=True,
-        timeout=60
+        timeout=60,
     )
+    for message, image in zip(messages, images):
+        message.edit_media(InputMediaPhoto(image, caption=message.caption), timeout=60)
 
     print()
 
@@ -288,7 +335,7 @@ def img2img_command(
     longopts = dict(longopts)
     strength, *prompt_unjoined = prompt_unjoined
     strength = int(strength)
-    if not 1 <= strength <= 100:
+    if not 0 < strength < 100:
         update.message.reply_text(
             "Strength must be between 1 and 100", quote=True, timeout=10
         )
@@ -302,15 +349,18 @@ def img2img_command(
         )
         return
 
-    update.message.reply_text("Generating...", quote=True, timeout=10)
-
     seed = int(longopts.get("--seed", random.randint(0, 99999999)))
     scale = float(longopts.get("--scale", 7.5))
+
+    batch_size = 3
+    batches = 3
+
     images = generate(
         model_set=model_set,
         prompt=prompt,
         ddim_steps=50,
-        n_samples=9,
+        n_samples=batch_size,
+        n_iter=batches,
         seed=seed,
         scale=scale,
         img=img_bio,
@@ -320,56 +370,21 @@ def img2img_command(
         device=device,
     )
 
-    media_group = [InputMediaPhoto(x) for x in images]
-    media_group[0].caption = f"{prompt}\n\nSeed: {seed}"
-    update.message.reply_media_group(media_group, quote=True, timeout=60)
+    with open("loading.png", "rb") as f:
+        loading_bytes = f.read()
+    loading_photos = [
+        InputMediaPhoto(loading_bytes) for _ in range(batches * batch_size)
+    ]
+    loading_photos[0].caption = f"{prompt}\n\nSeed: {seed}"
+    messages = update.message.reply_media_group(
+        loading_photos,
+        quote=True,
+        timeout=60,
+    )
+    for message, image in zip(messages, images):
+        message.edit_media(InputMediaPhoto(image, caption=message.caption), timeout=60)
 
     print()
-
-
-def load_model_set(device: str, small_batch: bool = False) -> ModelSet:
-    sd = load_model_from_config(f"{ckpt}")
-    li = []
-    lo = []
-    for key, value in sd.items():
-        sp = key.split('.')
-        if (sp[0]) == 'model':
-            if 'input_blocks' in sp:
-                li.append(key)
-            elif 'middle_block' in sp:
-                li.append(key)
-            elif 'time_embed' in sp:
-                li.append(key)
-            else:
-                lo.append(key)
-    for key in li:
-        sd['model1.' + key[6:]] = sd.pop(key)
-    for key in lo:
-        sd['model2.' + key[6:]] = sd.pop(key)
-
-    config = OmegaConf.load(config_path)
-
-    if small_batch:
-        config.modelUNet.params.small_batch = True
-    else:
-        config.modelUNet.params.small_batch = False
-
-    config.modelCondStage.params.cond_stage_config.params.device = device
-
-    model = instantiate_from_config(config.modelUNet)
-    _, _ = model.load_state_dict(sd, strict=False)
-    model.eval()
-    model.cdevice = device
-
-    modelCS = instantiate_from_config(config.modelCondStage)
-    _, _ = modelCS.load_state_dict(sd, strict=False)
-    modelCS.eval()
-
-    modelFS = instantiate_from_config(config.modelFirstStage)
-    _, _ = modelFS.load_state_dict(sd, strict=False)
-    modelFS.eval()
-
-    return ModelSet(model=model, modelCS=modelCS, modelFS=modelFS)
 
 
 def main() -> None:

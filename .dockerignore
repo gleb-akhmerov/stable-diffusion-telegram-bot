@@ -4,3 +4,6 @@ README.md
 LICENSE
 assets/
 *.egg-info
+venv/
+outputs/
+.git/

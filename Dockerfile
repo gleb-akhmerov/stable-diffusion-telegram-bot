@@ -7,7 +7,6 @@ RUN mkdir -p /opt/ldm_package
 COPY ./setup.py /opt/ldm_package
 COPY ./ldm /opt/ldm_package/ldm
 COPY ./configs /opt/ldm_package/configs
-COPY ./optimizedSD /opt/ldm_package/optimizedSD
 COPY environment.yaml /opt/ldm_package
 
 # For the ldm-dev user
