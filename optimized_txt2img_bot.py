@@ -268,13 +268,19 @@ def txt2img_command(
     longopts, prompt_unjoined = getopt.getopt(
         prompt.split(),
         shortopts='',
-        longopts=['seed=', 'scale='],
+        longopts=['seed=', 'scale=', 'steps='],
     )
     longopts = dict(longopts)
     prompt = ' '.join(prompt_unjoined)
 
     seed = int(longopts.get("--seed", random.randint(0, 99999999)))
     scale = float(longopts.get("--scale", 7.5))
+    steps = int(longopts.get("--steps", 50))
+    if not 1 <= steps <= 250:
+        update.message.reply_text(
+            "--steps must be between 1 and 250", quote=True
+        )
+        return
 
     batch_size = 3
     batches = 3
@@ -282,7 +288,7 @@ def txt2img_command(
     images = generate(
         model_set=model_set,
         prompt=prompt,
-        ddim_steps=50,
+        ddim_steps=steps,
         n_samples=batch_size,
         n_iter=batches,
         seed=seed,
@@ -330,7 +336,7 @@ def img2img_command(
     longopts, prompt_unjoined = getopt.getopt(
         prompt.split(),
         shortopts='',
-        longopts=['seed=', 'scale='],
+        longopts=['seed=', 'scale=', 'steps='],
     )
     longopts = dict(longopts)
     strength, *prompt_unjoined = prompt_unjoined
@@ -351,6 +357,12 @@ def img2img_command(
 
     seed = int(longopts.get("--seed", random.randint(0, 99999999)))
     scale = float(longopts.get("--scale", 7.5))
+    steps = int(longopts.get("--steps", 50))
+    if not 1 <= steps <= 250:
+        update.message.reply_text(
+            "--steps must be between 1 and 250", quote=True
+        )
+        return
 
     batch_size = 3
     batches = 3
@@ -358,7 +370,7 @@ def img2img_command(
     images = generate(
         model_set=model_set,
         prompt=prompt,
-        ddim_steps=50,
+        ddim_steps=steps,
         n_samples=batch_size,
         n_iter=batches,
         seed=seed,
