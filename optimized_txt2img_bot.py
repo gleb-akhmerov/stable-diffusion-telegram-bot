@@ -342,7 +342,7 @@ def txt2img_command(
     longopts, prompt_unjoined = getopt.getopt(
         prompt.split(),
         shortopts='',
-        longopts=['seed=', 'scale=', 'steps='],
+        longopts=['seed=', 'scale=', 'steps=', 'sampler='],
     )
     longopts = dict(longopts)
     prompt = ' '.join(prompt_unjoined)
@@ -353,6 +353,12 @@ def txt2img_command(
     if not 1 <= steps <= 250:
         update.message.reply_text(
             "--steps must be between 1 and 250", quote=True
+        )
+        return
+    sampler = longopts.get("--sampler", "ddim")
+    if sampler not in ["plms", "ddim"]:
+        update.message.reply_text(
+            "--sampler must be one of: plms, ddim", quote=True
         )
         return
 
@@ -368,6 +374,7 @@ def txt2img_command(
         seed=seed,
         scale=scale,
         device=device,
+        sampler=sampler,
     )
     with open("loading.png", "rb") as f:
         loading_bytes = f.read()
@@ -410,7 +417,7 @@ def img2img_command(
     longopts, prompt_unjoined = getopt.getopt(
         prompt.split(),
         shortopts='',
-        longopts=['seed=', 'scale=', 'steps=', 'loop='],
+        longopts=['seed=', 'scale=', 'steps=', 'sampler=', 'loop='],
     )
     longopts = dict(longopts)
     strength, *prompt_unjoined = prompt_unjoined
@@ -437,12 +444,19 @@ def img2img_command(
             "--steps must be between 1 and 250", quote=True
         )
         return
+    sampler = longopts.get("--sampler", "ddim")
+    if sampler not in ["plms", "ddim"]:
+        update.message.reply_text(
+            "--sampler must be one of: plms, ddim", quote=True
+        )
+        return
     loop = int(longopts.get("--loop", 1))
     if not 1 <= loop <= 50:
         update.message.reply_text(
             "--loop must be between 1 and 50", quote=True
         )
         return
+
     if loop == 1:
         batch_size = 3
         batches = 3
@@ -459,6 +473,7 @@ def img2img_command(
             W=resized_w,
             H=resized_h,
             device=device,
+            sampler=sampler,
         )
 
         with open("loading.png", "rb") as f:
@@ -493,6 +508,7 @@ def img2img_command(
             W=resized_w,
             H=resized_h,
             device=device,
+            sampler=sampler,
             loop_steps=loop,
         )
 
