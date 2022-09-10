@@ -404,7 +404,9 @@ def img2img_command(
     prompt = update.message.text[prefix_len:].strip()
 
     img_bio = BytesIO()
-    update.message.reply_to_message.photo[-1].get_file().download(out=img_bio)
+    media_mes = update.message.reply_to_message
+    media = media_mes.photo[-1] if media_mes.photo is not None else media_mes.document
+    media.get_file().download(out=img_bio)
     img_bio.seek(0)
 
     # W and H to resize keeping aspect ratio and maintaining fixed number of pixels
