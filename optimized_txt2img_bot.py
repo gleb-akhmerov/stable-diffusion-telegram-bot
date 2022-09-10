@@ -9,10 +9,12 @@ from typing import Literal, Optional, Union, IO
 import torch
 import numpy as np
 import copy
+import cv2
+import skimage
 from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm, trange
-from itertools import islice
+from itertools import islice, chain
 from einops import rearrange, repeat
 from torchvision.utils import make_grid
 import time
@@ -29,6 +31,17 @@ from optimizedSD.ddpm import UNet
 def chunk(it, size):
     it = iter(it)
     return iter(lambda: tuple(islice(it, size)), ())
+
+
+def ichunk(it, size):
+    it = iter(it)
+    while True:
+        chunk_it = islice(it, size)
+        try:
+            first_el = next(chunk_it)
+        except StopIteration:
+            return
+        yield chain((first_el,), chunk_it)
 
 
 def load_model_from_config(ckpt):
@@ -252,8 +265,67 @@ def generate(
                     del samples_ddim
 
 
+def do_loop(
+    model_set,
+    prompt,
+    ddim_steps,
+    n_samples,
+    n_iter,
+    seed,
+    scale,
+    img,
+    img_prompt_strength,
+    W,
+    H,
+    device,
+    loop_steps,
+):
+    loop_seed = seed
+
+    # color correction
+    correction_target = cv2.cvtColor(
+        cv2.imdecode(np.frombuffer(img.getvalue(), dtype=np.uint8), cv2.IMREAD_COLOR),
+        cv2.COLOR_BGR2LAB,
+    )
+
+    for _ in range(loop_steps):
+        img_bytes = next(
+            generate(
+                model_set=model_set,
+                prompt=prompt,
+                ddim_steps=ddim_steps,
+                n_samples=n_samples,
+                n_iter=n_iter,
+                seed=loop_seed,
+                scale=scale,
+                img=img,
+                img_prompt_strength=img_prompt_strength,
+                W=W,
+                H=H,
+                device=device,
+            )
+        )
+        new_img = BytesIO()
+        Image.fromarray(
+            cv2.cvtColor(
+                skimage.exposure.match_histograms(
+                    cv2.cvtColor(
+                        cv2.imdecode(np.frombuffer(img_bytes, dtype=np.uint8), cv2.IMREAD_COLOR),
+                        cv2.COLOR_BGR2LAB
+                    ),
+                    correction_target,
+                    channel_axis=2
+                ),
+                cv2.COLOR_LAB2RGB
+            ).astype("uint8")
+        ).save(new_img, format="png")
+        img = new_img
+        loop_seed += 1
+        yield img.getvalue()
+
+
 def txt2img_command(
-        update: Update, context: CallbackContext, model_set: ModelSet, device: str
+    update: Update, context: CallbackContext, model_set: ModelSet, device: str
 ) -> None:
     print(f"Command: {update.message.text}")
 
@@ -336,7 +408,7 @@ def img2img_command(
     longopts, prompt_unjoined = getopt.getopt(
         prompt.split(),
         shortopts='',
-        longopts=['seed=', 'scale=', 'steps='],
+        longopts=['seed=', 'scale=', 'steps=', 'loop='],
     )
     longopts = dict(longopts)
     strength, *prompt_unjoined = prompt_unjoined
@@ -363,38 +435,81 @@ def img2img_command(
             "--steps must be between 1 and 250", quote=True
         )
         return
+    loop = int(longopts.get("--loop", 1))
+    if not 1 <= loop <= 50:
+        update.message.reply_text(
+            "--loop must be between 1 and 50", quote=True
+        )
+        return
+    if loop == 1:
+        batch_size = 3
+        batches = 3
+        images = generate(
+            model_set=model_set,
+            prompt=prompt,
+            ddim_steps=steps,
+            n_samples=batch_size,
+            n_iter=batches,
+            seed=seed,
+            scale=scale,
+            img=img_bio,
+            img_prompt_strength=strength,
+            W=resized_w,
+            H=resized_h,
+            device=device,
+        )
 
-    batch_size = 3
-    batches = 3
+        with open("loading.png", "rb") as f:
+            loading_bytes = f.read()
+        loading_photos = [
+            InputMediaPhoto(loading_bytes) for _ in range(batch_size * batches)
+        ]
+        loading_photos[0].caption = f"{prompt}\n\nSeed: {seed}"
+        messages = update.message.reply_media_group(
+            loading_photos,
+            quote=True,
+            timeout=60,
+        )
+        for message, image in zip(messages, images):
+            message.edit_media(InputMediaPhoto(image, caption=message.caption), timeout=60)
 
-    images = generate(
-        model_set=model_set,
-        prompt=prompt,
-        ddim_steps=steps,
-        n_samples=batch_size,
-        n_iter=batches,
-        seed=seed,
-        scale=scale,
-        img=img_bio,
-        img_prompt_strength=strength,
-        W=resized_w,
-        H=resized_h,
-        device=device,
-    )
+    else:
+        batch_size = 1
+        batches = 1
+        img_count = loop
+        loop_seed = seed
+        images = do_loop(
+            model_set=model_set,
+            prompt=prompt,
+            ddim_steps=steps,
+            n_samples=batch_size,
+            n_iter=batches,
+            seed=loop_seed,
+            scale=scale,
+            img=img_bio,
+            img_prompt_strength=strength,
+            W=resized_w,
+            H=resized_h,
+            device=device,
+            loop_steps=loop,
+        )
 
-    with open("loading.png", "rb") as f:
-        loading_bytes = f.read()
-    loading_photos = [
-        InputMediaPhoto(loading_bytes) for _ in range(batches * batch_size)
-    ]
-    loading_photos[0].caption = f"{prompt}\n\nSeed: {seed}"
-    messages = update.message.reply_media_group(
-        loading_photos,
-        quote=True,
-        timeout=60,
-    )
-    for message, image in zip(messages, images):
-        message.edit_media(InputMediaPhoto(image, caption=message.caption), timeout=60)
+        with open("loading.png", "rb") as f:
+            loading_bytes = f.read()
+        imgs_left = loop
+        for imgs in ichunk(images, 9):
+            loading_photos = [
+                InputMediaPhoto(loading_bytes) for _ in range(min(imgs_left, 9))
+            ]
+            loading_photos[0].caption = f"{prompt}\n\nSeed: {seed}"
+            messages = update.message.reply_media_group(
+                loading_photos,
+                quote=True,
+                timeout=60,
+            )
+            for message, image in zip(messages, imgs):
+                message.edit_media(InputMediaPhoto(image, caption=message.caption), timeout=60)
+                imgs_left -= 1
 
     print()
 
