@@ -141,6 +141,7 @@ def generate(
     img: Optional[Union[IO[bytes], str]] = None,  # path or file-like
     img_prompt_strength: float = 0.8,
     device: str = "cuda",
+    sampler: Literal["plms", "ddim"] = "ddim",
 ):
     seed_everything(seed)
 
@@ -213,18 +214,18 @@ def generate(
                         )
                         # decode it
                         samples_ddim = model_set.model.decode(
-                            z_enc,
-                            c,
                             t_enc,
+                            c,
+                            z_enc,
                             unconditional_guidance_scale=scale,
                             unconditional_conditioning=uc,
+                            sampler=sampler,
                         )
                     else:
-                        shape = [C, H // f, W // f]
+                        shape = [n_samples, C, H // f, W // f]
                         samples_ddim = model_set.model.sample(
                             S=ddim_steps,
                             conditioning=c,
-                            batch_size=n_samples,
                             shape=shape,
                             verbose=False,
                             unconditional_guidance_scale=scale,
@@ -232,6 +233,7 @@ def generate(
                             eta=ddim_eta,
                             x_T=start_code,
                             seed=seed,
+                            sampler=sampler,
                         )
 
                     model_set.modelFS.to(device)
