@@ -405,7 +405,7 @@ def img2img_command(
 
     img_bio = BytesIO()
     media_mes = update.message.reply_to_message
-    media = media_mes.photo[-1] if media_mes.photo is not None else media_mes.document
+    media = media_mes.photo[-1] if media_mes.photo != [] else media_mes.document
     media.get_file().download(out=img_bio)
     img_bio.seek(0)
 
