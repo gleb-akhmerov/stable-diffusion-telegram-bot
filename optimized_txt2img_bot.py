@@ -213,7 +213,7 @@ def generate(
                             ddim_steps=ddim_steps,
                         )
                         # decode it
-                        samples_ddim = model_set.model.decode(
+                        samples_ddim = model_set.model.sample(
                             t_enc,
                             c,
                             z_enc,
@@ -280,6 +280,7 @@ def do_loop(
     W,
     H,
     device,
+    sampler,
     loop_steps,
 ):
     loop_seed = seed
@@ -305,6 +306,7 @@ def do_loop(
                 W=W,
                 H=H,
                 device=device,
+                sampler=sampler,
             )
         )
         new_img = BytesIO()
