@@ -527,8 +527,6 @@ def img2img_command(
                 message.edit_media(InputMediaPhoto(image, caption=message.caption), timeout=60)
                 imgs_left -= 1
 
-    print()
-
 
 def main() -> None:
     device = "cuda"
