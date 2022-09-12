@@ -331,8 +331,6 @@ def do_loop(
 def txt2img_command(
     update: Update, context: CallbackContext, model_set: ModelSet, device: str
 ) -> None:
-    print(f"Command: {update.message.text}")
-
     prefix_len = len("/g ")
     prompt = update.message.text[prefix_len:].strip()
     if not prompt:
@@ -392,14 +390,10 @@ def txt2img_command(
     for message, image in zip(messages, images):
         message.edit_media(InputMediaPhoto(image, caption=message.caption), timeout=60)
 
-    print()
-
 
 def img2img_command(
         update: Update, context: CallbackContext, model_set: ModelSet, device: str
 ) -> None:
-    print(f"Command: {update.message.text}")
-
     prefix_len = len("/i ")
     prompt = update.message.text[prefix_len:].strip()
 
