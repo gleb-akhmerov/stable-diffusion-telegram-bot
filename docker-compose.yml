@@ -1,13 +1,12 @@
 version: "3.9"
 services:
-  sd:
+  stable-diffusion-telegram:
     build: .
-    ports:
-      - "7860:7860"
+    user: "ldm-dev:ldm-dev"
     volumes:
-      - ../sd-data:/data
-      - ../sd-output:/output
-      - sd-cache:/root/.cache
+      - huggingface-cache:/home/ldm-dev/.cache/huggingface
+      - .:/opt/ldm
+      - ./optimizedSD:/opt/ldm_package/optimizedSD
     runtime: nvidia
 volumes:
-  sd-cache:
+  huggingface-cache:

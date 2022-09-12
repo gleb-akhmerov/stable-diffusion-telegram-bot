@@ -40,4 +40,10 @@ RUN pip3 install -e /opt/ldm_package
 RUN conda run -n ldm pip install pytorch-lightning==1.5
 RUN conda run -n ldm pip install python-telegram-bot==13.13
 
+# Create cache dir here to avoid problems with permissions
+# with volume in docker-compose.yml
+RUN mkdir -p /home/ldm-dev/.cache/huggingface
+
 ENTRYPOINT ["conda", "run", "-n", "ldm", "--no-capture-output"]
+
+CMD python optimized_txt2img_bot.py
