@@ -26,6 +26,7 @@ from telegram import Update, InputMediaPhoto
 from telegram.ext import Updater, CommandHandler, CallbackContext, Filters
 
 from optimizedSD.ddpm import UNet
+from optimizedSD.optimUtils import split_weighted_subprompts
 
 
 def chunk(it, size):
@@ -196,7 +197,18 @@ def generate(
                     if isinstance(prompts, tuple):
                         prompts = list(prompts)
 
-                    c = model_set.modelCS.get_learned_conditioning(prompts)
+                    subprompts, weights = split_weighted_subprompts(prompts[0])
+                    if len(subprompts) > 1:
+                        c = torch.zeros_like(uc)
+                        totalWeight = sum(weights)
+                        # normalize each "sub prompt" and add it
+                        for i in range(len(subprompts)):
+                            weight = weights[i]
+                            # if not skip_normalize:
+                            weight = weight / totalWeight
+                            c = torch.add(c, model_set.modelCS.get_learned_conditioning(subprompts[i]), alpha=weight)
+                    else:
+                        c = model_set.modelCS.get_learned_conditioning(prompts)
                     if device != 'cpu':
                         mem = torch.cuda.memory_allocated() / 1e6
                         model_set.modelCS.to("cpu")
